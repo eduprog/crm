@@ -2,13 +2,13 @@
 
 **Data:** 2026-10-05 10:44
 **Autor:** eduprog
-**Status:** Executado — pendente só a Etapa 0 (Google OAuth, manual)
+**Status:** Executado — Google OAuth configurado (2026-10-06); falta validar o primeiro login
 
 ## Andamento da execução
 
 | # | Fase | Estado | Observação |
 |---|---|---|---|
-| 0 | Google Cloud (OAuth client) | ⬜ pendente | Manual, feita pelo usuário. **Único bloqueio para o primeiro login** |
+| 0 | Google Cloud (OAuth client) | ✅ feito | Feito pelo usuário em 2026-10-06 (ver "Configuração do Google OAuth"). 1º login falhou: `hd "<missing>" does not satisfy "esistem.com.br"` → `ALLOWED_SIGN_IN` reduzido a `eduprog@gmail.com`. 2º login **OK** → parou no portão `/onboarding/research` (Context API key). Usuário criou a chave em context.dev e salvou pela tela → portão liberado |
 | 1 | `bun install` | ✅ feito | 1ª tentativa falhou (`postinstall` = `prisma generate` exige `DATABASE_URL`); 2ª OK após o `.env`. `bun.lock` marcado como modificado só por line-ending (diff vazio). `prepare` setou `core.hooksPath=.githooks` (hook `pre-push` roda testes) |
 | 2 | Bancos `crm` / `crm_test` | ✅ feito | Criados pelo usuário; UTF8 |
 | 3 | `.env` na raiz | ✅ feito | Copiado do `.env.example`; ignorado pelo git (`.gitignore:10`) |
@@ -141,7 +141,7 @@ Docker, então o roteiro precisa ser adaptado.
 | Segredos | `BETTER_AUTH_SECRET` e `AGENT_BRIDGE_SECRET` aleatórios (32 bytes, base64) | `docs/setup.md` proíbe reutilizar valor de exemplo |
 | Login | **Google** | Mesmo OAuth client faz o login e o sync de Gmail/Calendar |
 | Tela de consentimento Google | **External**, em modo **Testing** | Conta Gmail pessoal não pode usar User type *Internal* (exclusivo de Workspace). Testing dispensa verificação e CASA para até 100 test users |
-| `ALLOWED_SIGN_IN` | `esistem.com.br,eduprog@gmail.com,autocom-mg.com.br,microplan.com.br` | Três domínios de equipe de teste + o próprio Gmail como endereço único (nunca `gmail.com`) |
+| `ALLOWED_SIGN_IN` | ~~`esistem.com.br,eduprog@gmail.com,autocom-mg.com.br,microplan.com.br`~~ → **`eduprog@gmail.com`** (2026-10-06) | O 1º domínio da lista vira o `hd` do Google e barra contas Gmail pessoais — ver "Configuração do Google OAuth → Problemas conhecidos" |
 | Redis | `REDIS_URL="redis://localhost:6379/1"` | Usa o container existente. **Database lógico `1`** isola as chaves do CRM das de outros projetos que usam o db `0` |
 | Telemetria anônima | **Desligar** (`CRM_TELEMETRY_DISABLED="1"`) | Ver seção "Telemetria" — os dados vão para o PostHog dos autores, não para você |
 | Ponte do agente | `AGENT_URL="http://127.0.0.1:2000"` + `AGENT_BRIDGE_SECRET` | `eve dev` escuta só IPv4; sem o segredo a aba Agent fica desativada e o "poke" de dispatch não é enviado |
@@ -199,10 +199,10 @@ DATABASE_URL="postgresql://postgres:<senha-do-pgsql17>@localhost:5432/crm?schema
 TEST_DATABASE_URL="postgresql://postgres:<senha-do-pgsql17>@localhost:5432/crm_test?schema=public"
 
 BETTER_AUTH_SECRET="<gerado: 32 bytes base64>"
-ALLOWED_SIGN_IN="esistem.com.br,eduprog@gmail.com,autocom-mg.com.br,microplan.com.br"
+ALLOWED_SIGN_IN="eduprog@gmail.com"
 
-GOOGLE_CLIENT_ID=""        # preencher após criar o OAuth client (Etapa 0)
-GOOGLE_CLIENT_SECRET=""    # par obrigatório: os dois ou nenhum
+GOOGLE_CLIENT_ID="<id>.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET="GOCSPX-<segredo>"
 
 AGENT_URL="http://127.0.0.1:2000"
 AGENT_BRIDGE_SECRET="<gerado: 32 bytes base64>"
@@ -229,6 +229,8 @@ Os demais itens do `.env.example` permanecem comentados (defaults de localhost: 
    - Authorized redirect URI: `http://localhost:3001/api/auth/callback/google`
      (todo redirect é montado a partir de `API_URL`, nunca de `APP_URL`)
 5. Copiar Client ID e Client Secret para o `.env` e reiniciar o `bun run dev`.
+
+Passo a passo detalhado na seção **"Configuração do Google OAuth"**, logo abaixo das etapas.
 
 ### Etapa 1 — Dependências
 ```sh
@@ -292,6 +294,75 @@ Entregar a tabela de chaves abaixo marcando o estado de cada uma e os resultados
 
 ---
 
+## Configuração do Google OAuth
+
+O CRM usa **um único OAuth client do Google** para duas coisas: o **login** (Better Auth) e a
+**leitura de Gmail e Calendar** (sync que alimenta contatos, empresas e o agente). Não há login por
+e-mail/senha: `emailAndPassword.enabled` é `false` em `packages/auth/src/auth.ts:80-81`, e o SSO só é
+configurável por quem já está logado (Settings → SSO).
+
+### O que o CRM pede ao Google
+
+| Item | Valor | Onde está no código |
+|---|---|---|
+| Escopos | `openid`, `email`, `profile`, `https://www.googleapis.com/auth/gmail.readonly`, `https://www.googleapis.com/auth/calendar.readonly` | `packages/auth/src/scopes.ts:14-16` (`SYNC_SCOPES`) |
+| `accessType` | `offline` (refresh token para o sync em background) | `packages/auth/src/auth.ts:45` |
+| `hd` (hosted domain) | **Primeiro domínio** do `ALLOWED_SIGN_IN`, se houver | `packages/auth/src/auth.ts:48-49` → `packages/auth/src/workspace.ts:35-37` |
+| Redirect URI | `{API_URL}/api/auth/callback/google` → `http://localhost:3001/api/auth/callback/google` | Better Auth com `baseURL = API_URL` |
+
+### Passo a passo no Google Cloud Console (feito em 2026-10-06)
+
+Console novo ("Google Auth Platform"), em português.
+
+1. **Projeto dedicado** — seletor de projeto no topo → **Novo projeto** → nome `crm-local` →
+   **Criar** → selecionar o projeto. Separado de outros projetos porque `gmail.readonly` é escopo
+   *restrito*.
+2. **APIs** — ☰ → **APIs e serviços** → **Biblioteca** → ativar **Gmail API** e **Google Calendar API**.
+3. **App OAuth** — `https://console.cloud.google.com/auth/overview` → **Primeiros passos**:
+   - Nome do app: `CRM Local` · E-mail de suporte: `eduprog@gmail.com`
+   - Público-alvo: **Externo** (Gmail pessoal não pode usar *Interno*, exclusivo de Workspace)
+   - E-mail de contato: `eduprog@gmail.com` → aceitar termos → **Criar**
+4. **Público-alvo** — status de publicação **Teste**; **Usuários de teste** → adicionar
+   `eduprog@gmail.com` (e cada pessoa que for logar; máximo 100).
+5. **Acesso a dados** → **Adicionar ou remover escopos** → marcar `openid`,
+   `.../auth/userinfo.email`, `.../auth/userinfo.profile`, `.../auth/gmail.readonly`,
+   `.../auth/calendar.readonly` → **Atualizar** → **Salvar**.
+6. **Clientes** → **Criar cliente**:
+   - Tipo: **Aplicativo da Web** · Nome: `crm-local-web`
+   - Origens JavaScript autorizadas: `http://localhost:3000`, `http://localhost:3001`
+   - URIs de redirecionamento autorizados: `http://localhost:3001/api/auth/callback/google`
+   - **Criar** → copiar **ID do cliente** e **Chave secreta** (ou **Baixar JSON**) — no console novo
+     a chave secreta só é exibida por completo neste momento.
+7. **`.env`** (raiz) — preencher o par e reiniciar o `bun run dev`:
+   ```dotenv
+   GOOGLE_CLIENT_ID="<id>.apps.googleusercontent.com"
+   GOOGLE_CLIENT_SECRET="GOCSPX-<segredo>"
+   ALLOWED_SIGN_IN="eduprog@gmail.com"
+   ```
+   Nunca colar a chave secreta em chat, issue ou neste documento.
+
+### Duas portas de acesso
+
+| Porta | Onde se configura | O que barra |
+|---|---|---|
+| Google (modo Teste) | Console → Público-alvo → Usuários de teste | Conta fora da lista nem chega ao CRM ("Acesso bloqueado") |
+| CRM | `ALLOWED_SIGN_IN` no `.env` | Conta autenticada pelo Google mas fora da lista é recusada |
+
+Para liberar alguém novo: adicionar o e-mail **nas duas** e reiniciar o `bun run dev`.
+
+### Problemas conhecidos
+
+| Sintoma | Causa | Correção |
+|---|---|---|
+| Login volta para `/sign-in?error=unable_to_get_user_info`; log da API: `Google sign-in rejected: id token hosted domain (hd) "<missing>" does not satisfy the configured "hd" option "esistem.com.br"` | O **primeiro domínio** do `ALLOWED_SIGN_IN` vira o `hd` do Google, que só aceita contas **Google Workspace** daquele domínio. Gmail pessoal não tem `hd`; outros domínios da lista também são barrados | Usar **só endereços** no `ALLOWED_SIGN_IN` (ex.: `"eduprog@gmail.com,fulano@empresa.com.br"`). Domínio só é seguro quando é o **único** e é um Google Workspace |
+| "Acesso bloqueado: o app não concluiu o processo de verificação" | E-mail não está em Usuários de teste | Console → Público-alvo → Usuários de teste |
+| `redirect_uri_mismatch` | URI no Console diferente de `http://localhost:3001/api/auth/callback/google` | Corrigir em Clientes; usar a porta da **API** (3001), não a do app |
+| Sync do Gmail para após ~7 dias | Refresh token expira em apps no modo Teste | Logar de novo; ou publicar o app (exige verificação e CASA para `gmail.readonly`) |
+| Teste `Auth (e2e) > lets the sign-in page read what it may offer` falha no `pre-push` | O teste espera Google configurado; com `GOOGLE_CLIENT_ID=""` no `.env` o fallback do teste não se aplica | Ter o par preenchido, ou deixar as linhas **comentadas** (não vazias) |
+| "No way in yet — Set GOOGLE_CLIENT_ID…" na tela de login | Par Google ausente | Preencher o par e reiniciar |
+
+---
+
 ## Chaves — situação após o setup
 
 | Chave | Categoria | Estado | Efeito se ausente | Onde obter |
@@ -303,18 +374,50 @@ Entregar a tabela de chaves abaixo marcando o estado de cada uma e os resultados
 | `AGENT_URL` / `AGENT_BRIDGE_SECRET` | Ponte do agente | ✅ preenchidas | Aba Agent desativada; sem "poke" | — |
 | `REDIS_URL` | Operação | ✅ preenchida | Cache por instância (funciona) | — |
 | `CRM_TELEMETRY_DISABLED` | Privacidade | ✅ `"1"` | Telemetria diária enviada | — |
-| `GOOGLE_CLIENT_ID` + `_SECRET` | **Login** | ❌ **falta** | **Ninguém faz login**; sem sync Gmail/Calendar | Etapa 0 |
+| `GOOGLE_CLIENT_ID` + `_SECRET` | **Login** | ✅ preenchidas (2026-10-06) | **Ninguém faz login**; sem sync Gmail/Calendar | "Configuração do Google OAuth" |
 | `AI_GATEWAY_API_KEY` | Agente | ❌ falta | Agente sem modelo fora da Vercel — chat e pesquisa não rodam | https://vercel.com/docs/ai-gateway |
 | `PERPLEXITY_API_KEY` | Agente | ❌ falta (opcional) | Sem pesquisa na web aberta | https://perplexity.ai/settings/api |
 | `GITHUB_TOKEN` | Agente | ❌ falta (opcional) | GitHub limitado a 60 req/h | Token clássico sem escopos |
 | `BLOB_READ_WRITE_TOKEN` | Agente/API | ❌ falta (opcional) | Fotos de contato não são guardadas; logos hotlinked | Vercel Blob |
-| Context API key | Agente (na UI) | ❌ falta (opcional) | Sem dados de marca e LinkedIn | `/onboarding/research` ou Settings → General — **não é variável** |
+| Context API key | Agente (na UI) | ✅ salva pela tela (2026-10-06) | **Bloqueia o onboarding**; sem dados de marca e LinkedIn | `/onboarding/research` ou Settings → General — **não é variável** |
 | `MICROSOFT_CLIENT_ID` + `_SECRET` | Login alternativo | — fora do escopo | Sem login Microsoft/Outlook | Entra ID |
 | `SLACK_CLIENT_ID` + `_SECRET` | Opcional | — fora do escopo | Sem vínculo com Slack | Slack app |
 | `CRON_SECRET` | Operação | — fora do escopo | Rotas `/internal/sync/google` e retention recusam | Gerar (≥16 caracteres) |
 
 Prioridade sugerida: **Google** (para entrar) → **AI Gateway** (para o agente pensar) → Context →
 Perplexity → GitHub → Blob.
+
+### Context API key — portão obrigatório do onboarding (2026-10-06)
+
+Após o 1º login, o app redireciona para `/onboarding/research` ("Level up your CRM data") e **não
+deixa seguir** sem a chave: `apps/app/proxy.ts:48` envia para lá enquanto
+`settings.researchKey.configured` for `false` (`apps/app/lib/onboarding.ts:71-77`).
+
+- **O que é:** chave da [Context](https://link.context.dev/crm) (context.dev), serviço pago de dados de
+  empresas e pessoas. Dá ao agente **marca de empresa por domínio** (logo, cores, setor, nome real)
+  e **leitura de perfil do LinkedIn** a partir de uma URL já salva no contato. Cupom do projeto:
+  `CRM` (`packages/db/src/settings.ts:55-57`).
+- **Onde fica:** não é variável de ambiente; é a coluna `AppSetting.contextDevApiKey`
+  (`schema.prisma:1306`), gravada pela tela e lida por `readContextDevKey`.
+- **Validação:** o agente chama a Context ao salvar; só `401` recusa. Se o agente estiver fora do ar,
+  a chave é salva "não verificada".
+- **Atalho só para explorar a UI localmente:** gravar um valor fictício na coluna libera o portão;
+  as tarefas de marca/LinkedIn passam a falhar com `401` até uma chave real ser salva em
+  Settings → General.
+
+### Modelo do agente — Vercel é obrigatória? (2026-10-06)
+
+**Hospedar na Vercel: não.** Tudo roda local. **Para o agente "pensar"**, o `apps/agent/agent/agent.ts`
+usa um *model id* em string (`DEFAULT_AGENT_MODEL`), que o eve roteia pelo **Vercel AI Gateway**
+(`eve/docs/agent-config.md:23`, `guides/deployment/self-hosting.md:23`). Duas saídas:
+
+| Opção | O que precisa | Custo/efeito |
+|---|---|---|
+| AI Gateway | Conta Vercel + `AI_GATEWAY_API_KEY` no `.env` | Sem mudar código; cobra por uso; troca de modelo pela UI (Settings) continua funcionando |
+| Provedor direto (ex.: Anthropic) | `@ai-sdk/anthropic` em `apps/agent` + `ANTHROPIC_API_KEY` + mudar `agent.ts` para passar um `LanguageModel` | Diverge do upstream; a escolha de modelo pela UI deixa de valer; nova variável precisa entrar no `.env.example` e no `turbo.json` (`passThroughEnv`) |
+
+Sem nenhuma das duas, o CRM funciona (listas, deals, sync de Gmail/Calendar), mas o agente não
+conclui tarefas.
 
 ---
 
@@ -339,7 +442,7 @@ Perplexity → GitHub → Blob.
 | Sem `AI_GATEWAY_API_KEY` | Tasks do agente ficam em fila e não concluem | Esperado até a chave existir |
 
 ## Pontos em aberto
-- Criação do OAuth client no Google Cloud (Etapa 0) — depende do usuário.
+- Validar o primeiro login com `ALLOWED_SIGN_IN="eduprog@gmail.com"`.
 - Obter `AI_GATEWAY_API_KEY` (requer conta Vercel).
 - Commitar ou não este plano (`docs/planos/` não é pasta do upstream).
 
